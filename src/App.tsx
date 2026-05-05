@@ -14,8 +14,7 @@ import {
   Check, 
   AlertCircle,
   FileSearch,
-  BookOpen,
-  Settings2
+  BookOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -31,13 +30,14 @@ const DRIVE_FOLDER_ID = "1-tvAV7zlYYhqcu_qEhb_QCamvZLAe1nk";
 //// --- SYSTEM INSTRUCTION (V5: EXTRAÇÃO TOTAL E FIEL) ---
 const SYSTEM_INSTRUCTION = `Extraia TODO o texto e todas as informações estruturais com 100% de integridade. 
 NÃO RESUMA, NÃO OMITA NADA. Cada caractere, vírgula e número é importante.
-Formate tabelas em Markdown.
+Mantenha a estrutura original de tabelas e listas conforme instruído no prompt específico de extração.
 Use "--- PÁGINA [N] ---" como separador.`;
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
+  const [structuredTableMode, setStructuredTableMode] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [result, setResult] = useState<string | null>(null);
   const [debugLog, setDebugLog] = useState<string | null>(null);
@@ -49,6 +49,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [splitting, setSplitting] = useState(false);
   const [syncSuccess, setSyncSuccess] = useState(false);
+  const [tokensSpent, setTokensSpent] = useState<number>(0);
 
   // Listen for OAuth Success from popup
   useEffect(() => {
@@ -97,6 +98,7 @@ export default function App() {
     setResult("");
     setDebugLog(null);
     setSyncSuccess(false);
+    setTokensSpent(0);
     
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -126,6 +128,7 @@ export default function App() {
         const chunkBase64 = await chunkDoc.saveAsBase64();
 
         const debugPrompt = debugMode ? "\nInclua ao final um diagnóstico das páginas ignoradas neste lote e o motivo." : "";
+        const tablePrompt = structuredTableMode ? "\nPARA TABELAS: Extraia EXCLUSIVAMENTE em formato JSON estruturado (array de objetos). Se a estrutura for impossível de capturar em JSON, use uma lista de tópicos (bullet points) extremamente detalhada e fiel. NÃO use Markdown para tabelas se este modo estiver ativo." : "\nPARA TABELAS: Use formato Markdown para tabelas.";
 
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
@@ -139,7 +142,7 @@ export default function App() {
                   }
                 },
                 {
-                  text: `Extraia os dados deste lote (${start + 1} a ${end}). Remova artefatos e limpe caracteres especiais.${debugPrompt}`
+                  text: `Extraia os dados deste lote (${start + 1} a ${end}). Remova artefatos e limpe caracteres especiais.${debugPrompt}${tablePrompt}`
                 }
               ]
             }
@@ -150,6 +153,10 @@ export default function App() {
         });
 
         const textOutput = response.text;
+        const usage = response.usageMetadata;
+        if (usage?.totalTokenCount) {
+          setTokensSpent(prev => prev + usage.totalTokenCount);
+        }
         if (textOutput) {
           // Separar diagnóstico se existir
           if (debugMode && textOutput.includes("DIAGNÓSTICO")) {
@@ -239,13 +246,36 @@ export default function App() {
   };
 
   const saveToDrive = async () => {
-    if (!result || !googleToken) return;
+    if (!result || !googleToken || !file) return;
     
     setSyncing(true);
     setSyncSuccess(false);
     
     try {
-      const fileName = `DATABASE_OCR_${file?.name.replace('.pdf', '') || 'EXTRACAO'}_${new Date().getTime()}.md`;
+      // 1. Salvar o arquivo Original (PDF)
+      const pdfMetadata = {
+        name: `ORIGINAL_${file.name}`,
+        parents: [DRIVE_FOLDER_ID],
+        mimeType: file.type
+      };
+
+      const pdfData = new FormData();
+      pdfData.append('metadata', new Blob([JSON.stringify(pdfMetadata)], { type: 'application/json' }));
+      pdfData.append('file', file);
+
+      await axios.post(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+        pdfData,
+        {
+          headers: {
+            Authorization: `Bearer ${googleToken}`,
+            'Content-Type': 'multipart/related'
+          }
+        }
+      );
+
+      // 2. Salvar a Extração (Markdown)
+      const fileName = `DATABASE_OCR_${file.name.replace('.pdf', '')}_${new Date().getTime()}.md`;
       const metadata = {
         name: fileName,
         parents: [DRIVE_FOLDER_ID],
@@ -314,11 +344,14 @@ export default function App() {
               <div className={cn("w-2 h-2 rounded-full", debugMode ? "bg-orange-500 animate-pulse" : "bg-gray-300")} />
               <span className="text-[10px] font-mono font-bold opacity-70 uppercase">DEPURAÇÃO: {debugMode ? "LIGADA" : "DESLIGADA"}</span>
             </div>
+            <div className="flex items-center gap-2 px-3 py-1 bg-black/5 rounded-full cursor-pointer hover:bg-black/10 transition-colors" onClick={() => setStructuredTableMode(!structuredTableMode)}>
+              <div className={cn("w-2 h-2 rounded-full", structuredTableMode ? "bg-blue-500 animate-pulse" : "bg-gray-300")} />
+              <span className="text-[10px] font-mono font-bold opacity-70 uppercase">TABELAS: {structuredTableMode ? "JSON" : "MARKDOWN"}</span>
+            </div>
             <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-black/5 rounded-full">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               <span className="text-[11px] font-mono font-medium opacity-70">SISTEMA ONLINE</span>
             </div>
-            <Settings2 className="w-5 h-5 opacity-40 hover:opacity-100 cursor-pointer transition-opacity" />
           </div>
         </div>
       </header>
@@ -441,6 +474,10 @@ export default function App() {
                   <div className="flex justify-between items-end border-b border-white/10 pb-2">
                     <span className="text-[10px] uppercase opacity-40">Latência Est.</span>
                     <span className="text-xs font-mono font-bold tracking-tighter">~120ms/pag</span>
+                  </div>
+                  <div className="flex justify-between items-end border-b border-white/10 pb-2">
+                    <span className="text-[10px] uppercase opacity-40">Tokens Processados</span>
+                    <span className="text-xs font-mono font-bold tracking-tighter">{tokensSpent.toLocaleString()}</span>
                   </div>
                   <div className="pt-4">
                     <a 
