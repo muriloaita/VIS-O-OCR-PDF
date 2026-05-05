@@ -28,23 +28,11 @@ import { cn } from './lib/utils';
 // --- DATABASE OCR CONFIG ---
 const DRIVE_FOLDER_ID = "1-tvAV7zlYYhqcu_qEhb_QCamvZLAe1nk";
 
-//// --- SYSTEM INSTRUCTION (V4: OCR TÉCNICO E ESTRUTURADO) ---
-const SYSTEM_INSTRUCTION = `Atue como um Engenheiro de Dados e Especialista em OCR Forense de Ultra-Alta Precisão.
-
-Missão: Extrair texto útil com 100% de integridade, convertendo estruturas complexas em formatos processáveis e filtrando ruídos.
-
-Diretrizes de Extração e Estrutura:
-1. TABELAS: Priorize a extração de tabelas em formato JSON ou CSV dentro de blocos de código markdown. Se a estrutura for ambígua, use listas hierárquicas.
-2. PÁGINAS EM BRANCO/RUÍDO: Ignore páginas sem conteúdo informativo. Se o modo depuração estiver ativo, relate brevemente: "Página [N] ignorada: [Motivo]".
-3. LIMPEZA DE CARACTERES: Identifique e remova caracteres especiais resultantes de erros de codificação (mojibake) ou sujeira de digitalização (ex: pontos isolados, símbolos sem contexto). Garanta que o texto final use UTF-8 limpo.
-4. FOCO EM DADOS: Priorize nomes, números, datas e cláusulas. Ignore elementos visuais decorativos ou marcas d'água.
-5. SEM ALUCINAÇÃO: Não tente interpretar assinaturas ilegíveis ou carimbos manchados. Use [?] apenas se for crucial.
-
-Formato de Saída:
-- Cabeçalho: "--- PÁGINA [N] ---"
-- Tabelas: \`\`\`json ou \`\`\`csv
-- Texto: Markdown limpo.
-- (Apenas se solicitado diagnóstico): "### DIAGNÓSTICO DE PÁGINAS IGNORADAS: ..."`;
+//// --- SYSTEM INSTRUCTION (V5: EXTRAÇÃO TOTAL E FIEL) ---
+const SYSTEM_INSTRUCTION = `Extraia TODO o texto e todas as informações estruturais com 100% de integridade. 
+NÃO RESUMA, NÃO OMITA NADA. Cada caractere, vírgula e número é importante.
+Formate tabelas em Markdown.
+Use "--- PÁGINA [N] ---" como separador.`;
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
