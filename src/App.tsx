@@ -27,17 +27,22 @@ import { cn } from './lib/utils';
 // --- DATABASE OCR CONFIG ---
 const DRIVE_FOLDER_ID = "1-tvAV7zlYYhqcu_qEhb_QCamvZLAe1nk";
 
-//// --- SYSTEM INSTRUCTION (V5: EXTRAÇÃO TOTAL E FIEL) ---
-const SYSTEM_INSTRUCTION = `Extraia TODO o texto e todas as informações estruturais com 100% de integridade. 
-NÃO RESUMA, NÃO OMITA NADA. Cada caractere, vírgula e número é importante.
-Mantenha a estrutura original de tabelas e listas conforme instruído no prompt específico de extração.
-Use "--- PÁGINA [N] ---" como separador.`;
+//// --- SYSTEM INSTRUCTION (V6: OCR LIMPO E ESTRUTURADO) ---
+const SYSTEM_INSTRUCTION = `Extraia TODO o texto e informações estruturais com 100% de integridade.
+REGRAS CRÍTICAS DE PROCESSAMENTO:
+1. FILTRAGEM DE RUÍDO: Ignore artefatos de digitalização, manchas, sujeira ou caracteres aleatórios (mojibake) que não formem palavras reais.
+2. ELEMENTOS NÃO-TEXTUAIS: Ignore logotipos puramente decorativos, marcas d'água ou bordas. Foque na substância dos dados.
+3. PÁGINAS EM BRANCO: Ignore totalmente páginas sem conteúdo informativo ou texto legível.
+4. INTEGRIDADE: Para textos reais, NÃO RESUMA e NÃO OMITA nada. Pontuação e números são vitais.
+ESTRUTURA DE TABELAS:
+- Priorize JSON estruturado (array de objetos). Caso a estrutura seja ambígua ou impossível em JSON, recorra a marcadores de tópicos detalhados e hierárquicos.
+Use "--- PÁGINA [N] ---" como separador apenas para páginas que contenham dados.`;
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
-  const [structuredTableMode, setStructuredTableMode] = useState(false);
+  const [structuredTableMode, setStructuredTableMode] = useState(true);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [result, setResult] = useState<string | null>(null);
   const [debugLog, setDebugLog] = useState<string | null>(null);
@@ -128,7 +133,7 @@ export default function App() {
         const chunkBase64 = await chunkDoc.saveAsBase64();
 
         const debugPrompt = debugMode ? "\nInclua ao final um diagnóstico das páginas ignoradas neste lote e o motivo." : "";
-        const tablePrompt = structuredTableMode ? "\nPARA TABELAS: Extraia EXCLUSIVAMENTE em formato JSON estruturado (array de objetos). Se a estrutura for impossível de capturar em JSON, use uma lista de tópicos (bullet points) extremamente detalhada e fiel. NÃO use Markdown para tabelas se este modo estiver ativo." : "\nPARA TABELAS: Use formato Markdown para tabelas.";
+        const tablePrompt = structuredTableMode ? "\nPARA TABELAS: Extraia EXCLUSIVAMENTE em formato JSON estruturado (array de objetos). Se a estrutura for impossível de capturar em JSON, recorra a marcadores de tópicos (bullet points) extremamente detalhados e fiéis. NÃO use Markdown para tabelas se este modo estiver ativo." : "\nPARA TABELAS: Use formato Markdown para tabelas.";
 
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
@@ -325,6 +330,24 @@ export default function App() {
     doc.save('extracao-ocr.pdf');
   };
 
+  const downloadAllProcessedFiles = async () => {
+    if (!result || !file) return;
+    const zip = new JSZip();
+    
+    // Add original PDF
+    zip.file(`ORIGINAL_${file.name}`, file);
+    
+    // Add Extraction (Markdown/JSON)
+    const fileName = `DATABASE_OCR_${file.name.replace('.pdf', '')}_${new Date().getTime()}.md`;
+    zip.file(fileName, result);
+    
+    const content = await zip.generateAsync({ type: "blob" });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(content);
+    link.download = `PACOTE_OCR_${file.name.replace('.pdf', '')}.zip`;
+    link.click();
+  };
+
   return (
     <div className="min-h-screen bg-[#F5F5F3] text-[#1A1A1A] font-sans selection:bg-[#1A1A1A] selection:text-white">
       {/* Header */}
@@ -449,6 +472,16 @@ export default function App() {
                 </button>
               )}
 
+              {result && !loading && (
+                <button
+                  onClick={downloadAllProcessedFiles}
+                  className="w-full mt-3 py-4 rounded-xl bg-black text-white font-bold uppercase tracking-widest flex items-center justify-center gap-3 hover:bg-black/80 transition-all shadow-lg active:scale-95"
+                >
+                  <Download className="w-5 h-5" />
+                  Baixar Pacote Completo (ZIP)
+                </button>
+              )}
+
               {error && (
                 <div className="mt-4 p-4 bg-red-50 border border-red-100 rounded-xl flex items-start gap-3 animate-in slide-in-from-top-2">
                   <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
@@ -567,6 +600,14 @@ export default function App() {
                       >
                         <Download className="w-4 h-4 opacity-40 group-hover:opacity-100" />
                         <span className="text-[10px] font-bold uppercase tracking-wider">Exportar PDF</span>
+                      </button>
+                      <div className="w-[1px] h-4 bg-black/10 mx-2" />
+                      <button 
+                        onClick={downloadAllProcessedFiles}
+                        className="p-2 bg-black text-white hover:bg-black/80 rounded-lg transition-all flex items-center gap-2 group shadow-sm active:scale-95"
+                      >
+                        <Download className="w-4 h-4" />
+                        <span className="text-[10px] font-bold uppercase tracking-wider">Baixar Tudo (ZIP)</span>
                       </button>
                     </motion.div>
                   )}
