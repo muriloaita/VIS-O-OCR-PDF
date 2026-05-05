@@ -36,7 +36,7 @@ async function startServer() {
     const { code } = req.query;
     
     if (!code) {
-      return res.send("Auth failed: No code provided");
+      return res.send("Falha na autenticação: Código não fornecido");
     }
 
     try {
@@ -71,8 +71,8 @@ async function startServer() {
         </html>
       `);
     } catch (error: any) {
-      console.error("Token exchange error:", error.response?.data || error.message);
-      res.status(500).send("Failed to exchange token");
+      console.error("Erro na troca de token:", error.response?.data || error.message);
+      res.status(500).send("Falha ao trocar o token");
     }
   });
 

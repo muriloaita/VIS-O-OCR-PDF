@@ -22,6 +22,7 @@ import ReactMarkdown from 'react-markdown';
 import { jsPDF } from 'jspdf';
 import { PDFDocument } from 'pdf-lib';
 import axios from 'axios';
+import JSZip from 'jszip';
 import { cn } from './lib/utils';
 
 // --- DATABASE OCR CONFIG ---
@@ -58,6 +59,7 @@ export default function App() {
   // Google Drive State
   const [googleToken, setGoogleToken] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [splitting, setSplitting] = useState(false);
   const [syncSuccess, setSyncSuccess] = useState(false);
 
   // Listen for OAuth Success from popup
@@ -210,6 +212,44 @@ export default function App() {
     }
   };
 
+  const downloadSplitZip = async () => {
+    if (!file) return;
+    setSplitting(true);
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdfDoc = await PDFDocument.load(arrayBuffer);
+      const totalPages = pdfDoc.getPageCount();
+      const CHUNK_SIZE = calculateDynamicChunkSize(totalPages);
+      
+      const zip = new JSZip();
+      const totalChunks = Math.ceil(totalPages / CHUNK_SIZE);
+      
+      for (let i = 0; i < totalPages; i += CHUNK_SIZE) {
+        const start = i;
+        const end = Math.min(i + CHUNK_SIZE, totalPages);
+        
+        const chunkDoc = await PDFDocument.create();
+        const pageIndices = Array.from({ length: end - start }, (_, idx) => start + idx);
+        const copiedPages = await chunkDoc.copyPages(pdfDoc, pageIndices);
+        copiedPages.forEach(page => chunkDoc.addPage(page));
+        
+        const chunkBytes = await chunkDoc.save();
+        zip.file(`lote_${Math.floor(i/CHUNK_SIZE) + 1}_paginas_${start+1}-${end}.pdf`, chunkBytes);
+      }
+      
+      const content = await zip.generateAsync({ type: "blob" });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(content);
+      link.download = `${file.name.replace('.pdf', '')}_dividido.zip`;
+      link.click();
+    } catch (err) {
+      console.error(err);
+      setError("Erro ao dividir o PDF.");
+    } finally {
+      setSplitting(false);
+    }
+  };
+
   const saveToDrive = async () => {
     if (!result || !googleToken) return;
     
@@ -278,13 +318,13 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-xl tracking-tight uppercase">Visão OCR Pro</h1>
-              <p className="text-[10px] uppercase tracking-widest opacity-50 font-semibold font-mono">Specialist Computer Vision Tool</p>
+              <p className="text-[10px] uppercase tracking-widest opacity-50 font-semibold font-mono">Ferramenta Especialista em Visão Computacional</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2 px-3 py-1 bg-black/5 rounded-full cursor-pointer hover:bg-black/10 transition-colors" onClick={() => setDebugMode(!debugMode)}>
               <div className={cn("w-2 h-2 rounded-full", debugMode ? "bg-orange-500 animate-pulse" : "bg-gray-300")} />
-              <span className="text-[10px] font-mono font-bold opacity-70 uppercase">DEBUG: {debugMode ? "ON" : "OFF"}</span>
+              <span className="text-[10px] font-mono font-bold opacity-70 uppercase">DEPURAÇÃO: {debugMode ? "LIGADA" : "DESLIGADA"}</span>
             </div>
             <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-black/5 rounded-full">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
@@ -372,6 +412,21 @@ export default function App() {
                   </>
                 )}
               </button>
+
+              {file && !loading && (
+                <button
+                  onClick={downloadSplitZip}
+                  disabled={splitting}
+                  className="w-full mt-3 py-3 rounded-xl border border-black/10 text-[10px] font-bold uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-black/5 transition-all text-black/60"
+                >
+                  {splitting ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  {splitting ? "Dividindo..." : "Baixar PDF Dividido (ZIP)"}
+                </button>
+              )}
 
               {error && (
                 <div className="mt-4 p-4 bg-red-50 border border-red-100 rounded-xl flex items-start gap-3 animate-in slide-in-from-top-2">
@@ -513,13 +568,13 @@ export default function App() {
                         <FileText className="w-16 h-16" />
                       </div>
                     </div>
-                    <p className="uppercase tracking-[0.2em] font-bold text-xs">
+                    <div className="uppercase tracking-[0.2em] font-bold text-xs text-center">
                       {loading ? (
                         <div className="flex flex-col gap-2">
                           <span>
                             {progress.total > 1 
                               ? `Processando lote ${progress.current} de ${progress.total}`
-                              : "Analizando Documento..."}
+                              : "Analisando Documento..."}
                           </span>
                           {progress.total > 1 && (
                             <div className="w-48 h-1.5 bg-black/5 rounded-full overflow-hidden mx-auto border border-black/5">
@@ -533,7 +588,7 @@ export default function App() {
                           )}
                         </div>
                       ) : "Aguardando Input..."}
-                    </p>
+                    </div>
                     <p className="text-[10px] font-medium leading-normal italic px-4">
                       {loading 
                         ? "Filtrando ruídos e descartando páginas em branco para uma extração limpa."
@@ -576,9 +631,9 @@ export default function App() {
       <footer className="mt-auto py-12 px-6">
         <div className="max-w-7xl mx-auto border-t border-black/5 pt-8 flex flex-col md:flex-row justify-between items-center gap-6 opacity-40 hover:opacity-100 transition-opacity">
           <div className="flex items-center gap-6">
-            <span className="text-[10px] font-bold uppercase tracking-[0.2em]">High precision OCR Specialist</span>
+            <span className="text-[10px] font-bold uppercase tracking-[0.2em]">Especialista em OCR de Alta Precisão</span>
             <div className="w-[1px] h-3 bg-black" />
-            <span className="text-[10px] font-bold uppercase tracking-[0.2em]">Powered by Gemini 3</span>
+            <span className="text-[10px] font-bold uppercase tracking-[0.2em]">Tecnologia Gemini 3</span>
           </div>
           <div className="flex items-center gap-4 grayscale">
             <div className="w-8 h-8 rounded bg-black/10" />
