@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { GoogleGenAI } from "@google/genai";
 import { 
   FileText, 
@@ -21,31 +21,62 @@ import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { jsPDF } from 'jspdf';
 import { PDFDocument } from 'pdf-lib';
+import axios from 'axios';
 import { cn } from './lib/utils';
 
-/// --- SYSTEM INSTRUCTION (OCR CIRÚRGICO: FILTRAGEM DE RUÍDO E PÁGINAS VAZIAS) ---
-const SYSTEM_INSTRUCTION = `Atue como um Especialista em OCR Forense de Ultra-Alta Precisão.
+// --- DATABASE OCR CONFIG ---
+const DRIVE_FOLDER_ID = "1-tvAV7zlYYhqcu_qEhb_QCamvZLAe1nk";
 
-Missão: Extrair apenas o texto ÚTIL e LEGÍVEL do documento, eliminando qualquer elemento não textual ou ruidoso.
+//// --- SYSTEM INSTRUCTION (V4: OCR TÉCNICO E ESTRUTURADO) ---
+const SYSTEM_INSTRUCTION = `Atue como um Engenheiro de Dados e Especialista em OCR Forense de Ultra-Alta Precisão.
 
-Diretrizes de Limpeza e Eficiência:
-1. PÁGINAS EM BRANCO/INÚTEIS: Se uma página não contiver texto legível (ex: for apenas uma folha em branco, apenas sombras, ou apenas borrões), IGNORE-A. Não gere cabeçalho nem conteúdo para ela.
-2. FILTRAGEM DE ARTEFATOS: Ignore agressivamente: marcas de furos de pasta, grampos, sombras de digitalização nas bordas, manchas de café/sujeira, e carimbos que não contenham texto legível.
-3. FOCO TEXTUAL: Ignore elementos puramente decorativos, logos sem texto associado, ou marcas d'água de fundo que não prejudiquem o texto principal.
-4. ESTRUTURAÇÃO LIMPA: Use Markdown básico para títulos e listas. 
-5. TABELAS: Apenas transcreva como tabela se os dados forem claros. Caso contrário, organize como uma lista de tópicos estruturada para evitar poluição visual.
-6. ZERO ADIVINHAÇÃO: Se uma palavra estiver ilegível devido a ruído, use [?]. Nunca invente texto.
+Missão: Extrair texto útil com 100% de integridade, convertendo estruturas complexas em formatos processáveis e filtrando ruídos.
 
-Formato:
-Use "--- PÁGINA [N] ---" como separador APENAS para páginas que contenham texto relevante. Não mencione páginas ignoradas.`;
+Diretrizes de Extração e Estrutura:
+1. TABELAS: Priorize a extração de tabelas em formato JSON ou CSV dentro de blocos de código markdown. Se a estrutura for ambígua, use listas hierárquicas.
+2. PÁGINAS EM BRANCO/RUÍDO: Ignore páginas sem conteúdo informativo. Se o modo depuração estiver ativo, relate brevemente: "Página [N] ignorada: [Motivo]".
+3. LIMPEZA DE CARACTERES: Identifique e remova caracteres especiais resultantes de erros de codificação (mojibake) ou sujeira de digitalização (ex: pontos isolados, símbolos sem contexto). Garanta que o texto final use UTF-8 limpo.
+4. FOCO EM DADOS: Priorize nomes, números, datas e cláusulas. Ignore elementos visuais decorativos ou marcas d'água.
+5. SEM ALUCINAÇÃO: Não tente interpretar assinaturas ilegíveis ou carimbos manchados. Use [?] apenas se for crucial.
+
+Formato de Saída:
+- Cabeçalho: "--- PÁGINA [N] ---"
+- Tabelas: \`\`\`json ou \`\`\`csv
+- Texto: Markdown limpo.
+- (Apenas se solicitado diagnóstico): "### DIAGNÓSTICO DE PÁGINAS IGNORADAS: ..."`;
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [debugMode, setDebugMode] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [result, setResult] = useState<string | null>(null);
+  const [debugLog, setDebugLog] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  
+  // Google Drive State
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncSuccess, setSyncSuccess] = useState(false);
+
+  // Listen for OAuth Success from popup
+  useEffect(() => {
+    const handleAuthMessage = (event: MessageEvent) => {
+      // Validate origin is from AI Studio preview or localhost
+      const origin = event.origin;
+      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
+        return;
+      }
+
+      if (event.data?.type === 'GOOGLE_AUTH_SUCCESS') {
+        setGoogleToken(event.data.accessToken);
+        setSyncSuccess(false);
+      }
+    };
+    window.addEventListener('message', handleAuthMessage);
+    return () => window.removeEventListener('message', handleAuthMessage);
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -53,10 +84,19 @@ export default function App() {
       setFile(selectedFile);
       setError(null);
       setResult(null);
+      setDebugLog(null);
+      setSyncSuccess(false);
       setProgress({ current: 0, total: 0 });
     } else {
       setError('Por favor, selecione um arquivo PDF válido.');
     }
+  };
+
+  const calculateDynamicChunkSize = (totalPages: number) => {
+    if (totalPages <= 50) return 10;
+    if (totalPages <= 200) return 30;
+    if (totalPages <= 500) return 50;
+    return 80; // Máximo para manter estabilidade e progressão
   };
 
   const processOCR = async () => {
@@ -65,6 +105,8 @@ export default function App() {
     setLoading(true);
     setError(null);
     setResult("");
+    setDebugLog(null);
+    setSyncSuccess(false);
     
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -72,11 +114,12 @@ export default function App() {
       const pdfDoc = await PDFDocument.load(arrayBuffer);
       const totalPages = pdfDoc.getPageCount();
       
-      const CHUNK_SIZE = 50; // Lotes menores para progresso constante e segurança de tokens
+      const CHUNK_SIZE = calculateDynamicChunkSize(totalPages);
       const totalChunks = Math.ceil(totalPages / CHUNK_SIZE);
       setProgress({ current: 0, total: totalChunks });
 
       let fullResult = "";
+      let fullDebug = "";
 
       for (let i = 0; i < totalPages; i += CHUNK_SIZE) {
         const currentChunkIndex = Math.floor(i / CHUNK_SIZE) + 1;
@@ -92,6 +135,8 @@ export default function App() {
         
         const chunkBase64 = await chunkDoc.saveAsBase64();
 
+        const debugPrompt = debugMode ? "\nInclua ao final um diagnóstico das páginas ignoradas neste lote e o motivo." : "";
+
         const response = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: [
@@ -104,7 +149,7 @@ export default function App() {
                   }
                 },
                 {
-                  text: `Processe este lote de páginas (${start + 1} a ${end}). Gere a transcrição limpa seguindo o prompt de sistema.`
+                  text: `Extraia os dados deste lote (${start + 1} a ${end}). Remova artefatos e limpe caracteres especiais.${debugPrompt}`
                 }
               ]
             }
@@ -116,24 +161,91 @@ export default function App() {
 
         const textOutput = response.text;
         if (textOutput) {
-          fullResult += (fullResult ? "\n\n" : "") + textOutput;
+          // Separar diagnóstico se existir
+          if (debugMode && textOutput.includes("DIAGNÓSTICO")) {
+            const parts = textOutput.split(/### DIAGNÓSTICO DE PÁGINAS IGNORADAS:?/);
+            fullResult += (fullResult ? "\n\n" : "") + parts[0].trim();
+            if (parts[1]) fullDebug += (fullDebug ? "\n" : "") + parts[1].trim();
+          } else {
+            fullResult += (fullResult ? "\n\n" : "") + textOutput;
+          }
           setResult(fullResult);
+          if (fullDebug) setDebugLog(fullDebug);
         }
       }
 
-      if (!fullResult) {
-        throw new Error("Não foi possível extrair texto do documento.");
+      if (!fullResult && !fullDebug) {
+        throw new Error("Não foi possível extrair conteúdo útil do documento.");
       }
     } catch (err: any) {
       console.error(err);
-      let errorMessage = "Erro ao processar o arquivo. Tente novamente.";
-      if (err?.message?.includes("page limit")) {
-        errorMessage = "O documento é muito extenso para as cotas atuais da API.";
-      }
+      let errorMessage = "Erro crítico no processamento. Verifique o arquivo.";
+      if (err?.message?.includes("API_KEY")) errorMessage = "Chave API inválida.";
       setError(errorMessage);
     } finally {
       setLoading(false);
       setProgress({ current: 0, total: 0 });
+    }
+  };
+
+  const connectGoogleDrive = async () => {
+    try {
+      const response = await fetch('/api/auth/google/url');
+      if (!response.ok) throw new Error('Falha ao obter URL de autenticação');
+      const { url } = await response.json();
+      
+      const width = 600;
+      const height = 700;
+      const left = window.innerWidth / 2 - width / 2;
+      const top = window.innerHeight / 2 - height / 2;
+      
+      window.open(
+        url,
+        'google_auth',
+        `width=${width},height=${height},left=${left},top=${top}`
+      );
+    } catch (err) {
+      console.error(err);
+      setError("Erro ao conectar com Google Drive.");
+    }
+  };
+
+  const saveToDrive = async () => {
+    if (!result || !googleToken) return;
+    
+    setSyncing(true);
+    setSyncSuccess(false);
+    
+    try {
+      const fileName = `DATABASE_OCR_${file?.name.replace('.pdf', '') || 'EXTRACAO'}_${new Date().getTime()}.md`;
+      const metadata = {
+        name: fileName,
+        parents: [DRIVE_FOLDER_ID],
+        mimeType: 'text/markdown'
+      };
+
+      const formData = new FormData();
+      formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+      formData.append('file', new Blob([result], { type: 'text/markdown' }));
+
+      await axios.post(
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+        formData,
+        {
+          headers: {
+            Authorization: `Bearer ${googleToken}`,
+            'Content-Type': 'multipart/related'
+          }
+        }
+      );
+
+      setSyncSuccess(true);
+    } catch (err: any) {
+      console.error("Drive upload error:", err.response?.data || err.message);
+      setError("Falha ao salvar no Google Drive. Verifique a conexão.");
+      if (err.response?.status === 401) setGoogleToken(null);
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -170,6 +282,10 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 px-3 py-1 bg-black/5 rounded-full cursor-pointer hover:bg-black/10 transition-colors" onClick={() => setDebugMode(!debugMode)}>
+              <div className={cn("w-2 h-2 rounded-full", debugMode ? "bg-orange-500 animate-pulse" : "bg-gray-300")} />
+              <span className="text-[10px] font-mono font-bold opacity-70 uppercase">DEBUG: {debugMode ? "ON" : "OFF"}</span>
+            </div>
             <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-black/5 rounded-full">
               <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               <span className="text-[11px] font-mono font-medium opacity-70">SISTEMA ONLINE</span>
@@ -283,6 +399,19 @@ export default function App() {
                     <span className="text-[10px] uppercase opacity-40">Latência Est.</span>
                     <span className="text-xs font-mono font-bold tracking-tighter">~120ms/pag</span>
                   </div>
+                  <div className="pt-4">
+                    <a 
+                      href="https://drive.google.com/drive/folders/1-tvAV7zlYYhqcu_qEhb_QCamvZLAe1nk?usp=sharing"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-[10px] uppercase font-bold text-blue-400 hover:text-blue-300 transition-colors group"
+                    >
+                      <div className="bg-blue-500/20 p-1 rounded group-hover:bg-blue-500/30">
+                        <img src="https://www.gstatic.com/images/branding/product/1x/drive_48dp.png" className="w-3 h-3 invert pointer-events-none" alt="Drive" />
+                      </div>
+                      Acessar DATABASE_OCR
+                    </a>
+                  </div>
                 </div>
               </div>
               {/* Decorative background element */}
@@ -309,6 +438,41 @@ export default function App() {
                       exit={{ opacity: 0, x: 20 }}
                       className="flex items-center gap-2"
                     >
+                      {googleToken ? (
+                        <button 
+                          onClick={saveToDrive}
+                          disabled={syncing}
+                          className={cn(
+                            "p-2 rounded-lg transition-all flex items-center gap-2 group",
+                            syncSuccess ? "bg-green-50 text-green-700" : "hover:bg-black/5"
+                          )}
+                        >
+                          {syncing ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                          ) : syncSuccess ? (
+                            <Check className="w-4 h-4" />
+                          ) : (
+                            <div className="bg-blue-100 p-0.5 rounded shadow-sm">
+                              <img src="https://www.gstatic.com/images/branding/product/1x/drive_48dp.png" className="w-3 h-3" alt="Drive" />
+                            </div>
+                          )}
+                          <span className="text-[10px] font-bold uppercase tracking-wider">
+                            {syncing ? "Sincronizando..." : syncSuccess ? "Salvo no DB" : "Sincronizar no Drive"}
+                          </span>
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={connectGoogleDrive}
+                          className="p-2 hover:bg-black/5 rounded-lg transition-colors flex items-center gap-2 group"
+                        >
+                          <div className="bg-white p-0.5 rounded shadow-sm border border-black/5">
+                            <img src="https://www.gstatic.com/images/branding/product/1x/drive_48dp.png" className="w-3 h-3" alt="Drive" />
+                          </div>
+                          <span className="text-[10px] font-bold uppercase tracking-wider opacity-40 group-hover:opacity-100 italic">Conectar Drive</span>
+                        </button>
+                      )}
+                      
+                      <div className="w-[1px] h-4 bg-black/10 mx-2" />
                       <button 
                         onClick={copyToClipboard}
                         className="p-2 hover:bg-black/5 rounded-lg transition-colors flex items-center gap-2 group"
@@ -330,9 +494,15 @@ export default function App() {
               </div>
 
               <div className={cn(
-                "flex-1 p-8 overflow-y-auto font-mono text-[13px] leading-relaxed",
+                "flex-1 p-8 overflow-y-auto font-mono text-[13px] leading-relaxed relative",
                 !result && "flex items-center justify-center"
               )}>
+                {debugMode && debugLog && (
+                  <div className="absolute right-4 top-4 z-20 max-w-[200px] bg-orange-50/90 border border-orange-200 rounded-lg p-3 shadow-xl backdrop-blur-sm animate-in slide-in-from-right-4">
+                    <h4 className="text-[9px] font-bold uppercase text-orange-800 mb-2 border-b border-orange-200 pb-1">Log de Depuração</h4>
+                    <pre className="text-[8px] text-orange-700 whitespace-pre-wrap leading-tight">{debugLog}</pre>
+                  </div>
+                )}
                 {!result ? (
                   <div className="text-center max-w-sm space-y-4 opacity-30 select-none">
                     <div className="flex justify-center">
